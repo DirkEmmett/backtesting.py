@@ -5,6 +5,9 @@ These were the major changes contributing to each release:
 
 ### 0.x.x
 
+* Bug fixes:
+  * Realize selected trades' net PnL at exit, not entry, in `lib.compute_stats()`.
+
 ### 0.6.6
 (2026-07-22)
 

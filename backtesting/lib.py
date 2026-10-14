@@ -184,6 +184,10 @@ def compute_stats(
     `data` is OHLC data as passed to the `backtesting.backtesting.Backtest`
     the `stats` were obtained in.
     `trades` can be a dataframe subset of `stats._trades` (e.g. only long trades).
+    When supplied, the equity curve starts at the original starting equity and
+    realizes each selected trade's net PnL at its exit bar. It does not include
+    unrealized PnL or reproduce the original mark-to-market equity curve.
+    With `trades=None`, the original recorded equity curve is used unchanged.
     You can also tune `risk_free_rate`, used in calculation of Sharpe and Sortino ratios.
 
         >>> stats = Backtest(GOOG, MyStrategy).run()
@@ -195,11 +199,10 @@ def compute_stats(
     if trades is None:
         trades = stats._trades
     else:
-        # XXX: Is this buggy?
         equity = equity.copy()
         equity[:] = stats._equity_curve.Equity.iloc[0]
         for t in trades.itertuples(index=False):
-            equity.iloc[t.EntryBar:] += t.PnL
+            equity.iloc[t.ExitBar:] += t.PnL
     return _compute_stats(trades=trades, equity=equity.values, ohlc_data=data,
                           risk_free_rate=risk_free_rate, strategy_instance=stats._strategy)
 

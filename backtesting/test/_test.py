@@ -14,7 +14,7 @@ from unittest import TestCase
 
 import numpy as np
 import pandas as pd
-from pandas.testing import assert_frame_equal
+from pandas.testing import assert_frame_equal, assert_series_equal
 
 from backtesting import Backtest as _Backtest, Strategy
 from backtesting._stats import compute_drawdown_duration_peaks
@@ -1008,6 +1008,103 @@ class TestLib(TestCase):
         self.assertEqual(long_stats['# Trades'], len(only_long_trades))
         self.assertEqual(stats._strategy, long_stats._strategy)
         assert_frame_equal(long_stats._trades, only_long_trades)
+
+    def test_compute_stats_realizes_pnl_at_exit(self):
+        class SingleTrade(_S):
+            size = 1
+
+            def next(self):
+                if len(self.data) == 2:
+                    if self.size > 0:
+                        self.buy(size=self.size)
+                    else:
+                        self.sell(size=-self.size)
+                elif self.position:
+                    self.position.close()
+
+        prices = [100, 100, 100, 90, 90]
+        data = pd.DataFrame(
+            {column: prices for column in ('Open', 'High', 'Low', 'Close')},
+            index=pd.date_range('2020-01-01', periods=len(prices)),
+        )
+        for size, commission, pnl in ((1, 0, -10), (-1, 0, 10), (1, .01, -11.9)):
+            with self.subTest(size=size, commission=commission):
+                stats = Backtest(data, SingleTrade, cash=1000, commission=commission).run(
+                    size=size)
+                self.assertEqual(len(stats._trades), 1)
+                trade = stats._trades.iloc[0]
+                self.assertEqual(trade.EntryBar, 2)
+                self.assertEqual(trade.ExitBar, 3)
+                self.assertAlmostEqual(trade.PnL, pnl)
+
+                selected = compute_stats(stats=stats, data=data, trades=stats._trades)
+                np.testing.assert_allclose(
+                    selected._equity_curve.Equity,
+                    [1000, 1000, 1000, 1000 + pnl, 1000 + pnl],
+                )
+                self.assertAlmostEqual(selected['Equity Final [$]'], 1000 + pnl)
+                self.assertAlmostEqual(selected['Return [%]'], pnl / 1000 * 100)
+                if pnl < 0:
+                    self.assertEqual(selected['Max. Drawdown Duration'], pd.Timedelta(days=2))
+                    self.assertAlmostEqual(selected['Max. Drawdown [%]'], pnl / 1000 * 100)
+                else:
+                    self.assertEqual(selected['Max. Drawdown [%]'], 0)
+
+    def test_compute_stats_overlapping_trades_and_original_equity(self):
+        class OverlappingTrades(_S):
+            def next(self):
+                if len(self.data) == 2:
+                    self.buy(size=1, tag='first')
+                    self.buy(size=2, tag='second')
+                elif len(self.data) == 3:
+                    self.buy(size=1, tag='later')
+                elif len(self.data) == 4:
+                    for trade in self.trades:
+                        if trade.tag != 'later':
+                            trade.close()
+                elif len(self.data) == 5:
+                    self.position.close()
+
+        prices = [100, 100, 100, 110, 120, 90, 90]
+        data = pd.DataFrame(
+            {column: prices for column in ('Open', 'High', 'Low', 'Close')},
+            index=pd.date_range('2020-01-01', periods=len(prices)),
+        )
+        stats = Backtest(data, OverlappingTrades, cash=1000).run()
+        original_stats = stats.drop(['_equity_curve', '_trades']).copy(deep=True)
+        original_equity = stats._equity_curve.copy(deep=True)
+        original_trades = stats._trades.copy(deep=True)
+        trades_by_tag = stats._trades.set_index('Tag').loc[['first', 'second', 'later']]
+        np.testing.assert_array_equal(trades_by_tag.EntryBar, [2, 2, 3])
+        np.testing.assert_array_equal(trades_by_tag.ExitBar, [4, 4, 5])
+        np.testing.assert_allclose(trades_by_tag.PnL, [20, 40, -20])
+        np.testing.assert_allclose(
+            original_equity.Equity, [1000, 1000, 1000, 1030, 1070, 1040, 1040])
+
+        selections = (
+            (stats._trades, [1000, 1000, 1000, 1000, 1060, 1040, 1040]),
+            (stats._trades[stats._trades.Tag != 'second'],
+             [1000, 1000, 1000, 1000, 1020, 1000, 1000]),
+            (stats._trades.iloc[:0], [1000] * len(data)),
+        )
+        for trades, expected_equity in selections:
+            with self.subTest(tags=trades.Tag.tolist()):
+                original_selection = trades.copy(deep=True)
+                selected = compute_stats(stats=stats, data=data, trades=trades)
+                np.testing.assert_allclose(selected._equity_curve.Equity, expected_equity)
+                self.assertEqual(selected['# Trades'], len(trades))
+                self.assertEqual(selected['Equity Final [$]'], expected_equity[-1])
+                self.assertAlmostEqual(
+                    selected['Return [%]'], (expected_equity[-1] - 1000) / 1000 * 100)
+                assert_frame_equal(selected._trades, original_selection)
+                assert_frame_equal(trades, original_selection)
+
+        recomputed = compute_stats(stats=stats, data=data, trades=None)
+        assert_frame_equal(recomputed._equity_curve, original_equity)
+        assert_frame_equal(recomputed._trades, original_trades)
+        assert_series_equal(stats.drop(['_equity_curve', '_trades']), original_stats)
+        assert_frame_equal(stats._equity_curve, original_equity)
+        assert_frame_equal(stats._trades, original_trades)
 
     def test_SignalStrategy(self):
         class S(SignalStrategy):
